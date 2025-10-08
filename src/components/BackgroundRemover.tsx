@@ -103,36 +103,6 @@ const BackgroundRemover: React.FC = () => {
       .map(({r, g, b}) => ({r, g, b}));
   };
 
-  // 边缘检测
-  const detectEdges = (imageData: ImageData, threshold: number): boolean[] => {
-    const data = imageData.data;
-    const width = imageData.width;
-    const height = imageData.height;
-    const edges = new Array(width * height).fill(false);
-    
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const idx = y * width + x;
-        const pixelIdx = idx * 4;
-        
-        // Sobel 边缘检测
-        const gx = 
-          -1 * data[((y-1) * width + (x-1)) * 4] + 1 * data[((y-1) * width + (x+1)) * 4] +
-          -2 * data[(y * width + (x-1)) * 4] + 2 * data[(y * width + (x+1)) * 4] +
-          -1 * data[((y+1) * width + (x-1)) * 4] + 1 * data[((y+1) * width + (x+1)) * 4];
-          
-        const gy =
-          -1 * data[((y-1) * width + (x-1)) * 4] + -2 * data[((y-1) * width + x) * 4] + -1 * data[((y-1) * width + (x+1)) * 4] +
-          1 * data[((y+1) * width + (x-1)) * 4] + 2 * data[((y+1) * width + x) * 4] + 1 * data[((y+1) * width + (x+1)) * 4];
-        
-        const magnitude = Math.sqrt(gx * gx + gy * gy);
-        edges[idx] = magnitude > threshold;
-      }
-    }
-    
-    return edges;
-  };
-
   const removeBackground = useCallback(async () => {
     if (!originalImage || !canvasRef.current) return;
 
@@ -144,102 +114,123 @@ const BackgroundRemover: React.FC = () => {
       if (!ctx) throw new Error('无法获取画布上下文');
 
       const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
       img.onload = () => {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
+        try {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
 
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imageData.data;
-        const width = canvas.width;
-        const height = canvas.height;
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const data = imageData.data;
+          const width = canvas.width;
+          const height = canvas.height;
 
-        // 获取背景颜色
-        const backgroundColors = getBackgroundColors(imageData);
-        console.log('检测到的背景色:', backgroundColors);
+          console.log('开始处理图片，尺寸:', width, 'x', height);
 
-        // 边缘检测
-        const edges = detectEdges(imageData, settings.edgeDetection * 10);
+          // 获取背景颜色
+          const backgroundColors = getBackgroundColors(imageData);
+          console.log('检测到的背景色:', backgroundColors);
 
-        // 创建alpha通道
-        const alphaChannel = new Array(width * height).fill(255);
+          // 第一步：基于颜色相似度标记背景像素
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const pixelIdx = (y * width + x) * 4;
+              
+              const r = data[pixelIdx];
+              const g = data[pixelIdx + 1];
+              const b = data[pixelIdx + 2];
 
-        // 第一步：基于颜色相似度移除背景
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            const pixelIdx = idx * 4;
-            
-            const r = data[pixelIdx];
-            const g = data[pixelIdx + 1];
-            const b = data[pixelIdx + 2];
+              // 检查是否与背景色相似
+              let isBackground = false;
+              for (let bgColor of backgroundColors) {
+                const distance = colorDistance(r, g, b, bgColor.r, bgColor.g, bgColor.b);
+                if (distance < settings.colorTolerance) {
+                  isBackground = true;
+                  break;
+                }
+              }
 
-            // 检查是否与背景色相似
-            let isBackground = false;
-            for (let bgColor of backgroundColors) {
-              const distance = colorDistance(r, g, b, bgColor.r, bgColor.g, bgColor.b);
-              if (distance < settings.colorTolerance) {
-                isBackground = true;
-                break;
+              // 如果是背景色，设置为透明
+              if (isBackground) {
+                data[pixelIdx + 3] = 0; // alpha = 0 (透明)
               }
             }
-
-            // 如果是背景色且不在边缘附近
-            if (isBackground && !edges[idx]) {
-              alphaChannel[idx] = 0;
-            }
-            // 如果接近背景色，设置半透明
-            else if (isBackground) {
-              alphaChannel[idx] = Math.floor(255 * 0.3);
-            }
           }
-        }
 
-        // 第二步：羽化处理
-        if (settings.feathering > 0) {
-          const featherRadius = settings.feathering;
-          const newAlpha = [...alphaChannel];
-          
-          for (let y = featherRadius; y < height - featherRadius; y++) {
-            for (let x = featherRadius; x < width - featherRadius; x++) {
-              const idx = y * width + x;
-              
-              if (alphaChannel[idx] === 0) {
-                // 对周围像素进行羽化
-                for (let dy = -featherRadius; dy <= featherRadius; dy++) {
-                  for (let dx = -featherRadius; dx <= featherRadius; dx++) {
-                    const neighborIdx = (y + dy) * width + (x + dx);
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-                    
-                    if (distance <= featherRadius && alphaChannel[neighborIdx] > 0) {
-                      const fadeAmount = 1 - (distance / featherRadius);
-                      newAlpha[neighborIdx] = Math.min(
-                        newAlpha[neighborIdx],
-                        Math.floor(255 * fadeAmount)
-                      );
+          // 第二步：边缘处理 - 检测前景物体边缘附近的半透明处理
+          if (settings.edgeDetection > 0) {
+            const newData = new Uint8ClampedArray(data);
+            
+            for (let y = 1; y < height - 1; y++) {
+              for (let x = 1; x < width - 1; x++) {
+                const pixelIdx = (y * width + x) * 4;
+                
+                // 如果当前像素是背景（透明的）
+                if (data[pixelIdx + 3] === 0) {
+                  // 检查周围是否有前景像素
+                  let hasOpaqueNeighbor = false;
+                  
+                  for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                      if (dx === 0 && dy === 0) continue;
+                      
+                      const neighborY = y + dy;
+                      const neighborX = x + dx;
+                      
+                      if (neighborY >= 0 && neighborY < height && neighborX >= 0 && neighborX < width) {
+                        const neighborIdx = (neighborY * width + neighborX) * 4;
+                        if (data[neighborIdx + 3] > 0) {
+                          hasOpaqueNeighbor = true;
+                          break;
+                        }
+                      }
                     }
+                    if (hasOpaqueNeighbor) break;
+                  }
+                  
+                  // 如果有不透明的邻居，给当前像素一些透明度来平滑边缘
+                  if (hasOpaqueNeighbor && settings.feathering > 0) {
+                    newData[pixelIdx + 3] = Math.min(255, settings.feathering * 30);
                   }
                 }
               }
             }
+            
+            // 应用新的数据
+            data.set(newData);
           }
+
+          console.log('背景处理完成');
           
-          alphaChannel.splice(0, alphaChannel.length, ...newAlpha);
+          ctx.putImageData(imageData, 0, 0);
+          setProcessedImage(canvas.toDataURL('image/png'));
+          
+          toast({
+            title: "处理完成",
+            description: "背景已成功移除",
+          });
+        } catch (error) {
+          console.error('处理过程中出错:', error);
+          toast({
+            title: "处理失败",
+            description: "图片处理过程中出现错误",
+            variant: "destructive"
+          });
+        } finally {
+          setIsProcessing(false);
         }
-
-        // 应用alpha通道
-        for (let i = 0; i < alphaChannel.length; i++) {
-          data[i * 4 + 3] = alphaChannel[i];
-        }
-
-        ctx.putImageData(imageData, 0, 0);
-        setProcessedImage(canvas.toDataURL('image/png'));
-        setIsProcessing(false);
-        
+      };
+      
+      img.onerror = () => {
+        console.error('图片加载失败');
         toast({
-          title: "处理完成",
-          description: "背景已成功移除",
+          title: "加载失败",
+          description: "无法加载图片",
+          variant: "destructive"
         });
+        setIsProcessing(false);
       };
       
       img.src = originalImage;
@@ -365,10 +356,10 @@ const BackgroundRemover: React.FC = () => {
               <p className="text-xs text-muted-foreground">值越大，移除的背景范围越广</p>
             </div>
             <div className="space-y-3">
-              <Label htmlFor="edgeDetection">边缘检测: {settings.edgeDetection}</Label>
+              <Label htmlFor="edgeDetection">边缘处理: {settings.edgeDetection}</Label>
               <Slider
                 id="edgeDetection"
-                min={1}
+                min={0}
                 max={10}
                 step={1}
                 value={[settings.edgeDetection]}
@@ -434,7 +425,7 @@ const BackgroundRemover: React.FC = () => {
         <ul className="text-sm text-muted-foreground space-y-1">
           <li>• 选择背景色单一、对比度高的图片效果最佳</li>
           <li>• 如果背景没有完全移除，可以调高"颜色容差"参数</li>
-          <li>• 如果主体被误删，可以调低"颜色容差"或调高"边缘检测"</li>
+          <li>• 如果主体被误删，可以调低"颜色容差"或调高"边缘处理"</li>
           <li>• 使用"边缘羽化"让切割边缘更自然</li>
         </ul>
       </Card>
